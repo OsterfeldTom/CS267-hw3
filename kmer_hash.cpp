@@ -19,10 +19,10 @@ int main(int argc, char** argv) {
 
     // TODO: Dear Students,
     // Please remove this if statement, when you start writing your parallel implementation.
-    if (upcxx::rank_n() > 1) {
-        throw std::runtime_error("Error: parallel implementation not started yet!"
-                                 " (remove this when you start working.)");
-    }
+    // if (upcxx::rank_n() > 1) {
+    //     throw std::runtime_error("Error: parallel implementation not started yet!"
+    //                              " (remove this when you start working.)");
+    // }
 
     if (argc < 2) {
         BUtil::print("usage: srun -N nodes -n ranks ./kmer_hash kmer_file [verbose|test [prefix]]\n");
@@ -68,20 +68,39 @@ int main(int argc, char** argv) {
         BUtil::print("Finished reading kmers.\n");
     }
 
+    upcxx::barrier();
+
+    //upcxx::atomic_domain<int> ad({upcxx::atomic_op::compare_exchange,upcxx::atomic_op::load});
     auto start = std::chrono::high_resolution_clock::now();
 
     std::vector<kmer_pair> start_nodes;
 
-    for (auto& kmer : kmers) {
-        bool success = hashmap.insert(kmer);
-        if (!success) {
-            throw std::runtime_error("Error: HashMap is full!");
-        }
+    // Serial 
+    // for (auto& kmer : kmers) {
+    //     bool success = hashmap.insert(kmer).wait();
+    //     if (!success) {
+    //         throw std::runtime_error("Error: HashMap is full!");
+    //     }
 
+    //     if (kmer.backwardExt() == 'F') {
+    //         start_nodes.push_back(kmer);
+    //     }
+    // }
+
+    // Communication computation overlap
+
+    std::vector<upcxx::future<bool>> insert_futures;
+    for (auto& kmer : kmers) {
+        insert_futures.push_back(hashmap.insert(kmer));
         if (kmer.backwardExt() == 'F') {
             start_nodes.push_back(kmer);
         }
     }
+    if (!insert_futures.empty()) {
+        auto all_futures = upcxx::when_all(insert_futures.begin(), insert_futures.end());
+        all_futures.wait();
+    }
+
     auto end_insert = std::chrono::high_resolution_clock::now();
     upcxx::barrier();
 
@@ -98,11 +117,7 @@ int main(int argc, char** argv) {
         std::list<kmer_pair> contig;
         contig.push_back(start_kmer);
         while (contig.back().forwardExt() != 'F') {
-            kmer_pair kmer;
-            bool success = hashmap.find(contig.back().next_kmer(), kmer);
-            if (!success) {
-                throw std::runtime_error("Error: k-mer not found in hashmap.");
-            }
+            kmer_pair kmer = hashmap.find(contig.back().next_kmer()).wait();
             contig.push_back(kmer);
         }
         contigs.push_back(contig);
@@ -111,7 +126,7 @@ int main(int argc, char** argv) {
     auto end_read = std::chrono::high_resolution_clock::now();
     upcxx::barrier();
     auto end = std::chrono::high_resolution_clock::now();
-
+    //ad.destroy();
     std::chrono::duration<double> read = end_read - start_read;
     std::chrono::duration<double> insert = end_insert - start;
     std::chrono::duration<double> total = end - start;
